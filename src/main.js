@@ -52,10 +52,22 @@ const selLabel = document.getElementById('selLabel');
 
 /* ============================== Three ============================== */
 let renderer, scene, camera, controls, pmrem;
-let car, carRoot, glassMeshes = [];
+let car, glassMeshes = [];
 const selected = new Set();
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
+
+// TINTLAB: render-on-demand core
+let renderQueued = false;
+function requestRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  queueMicrotask(() => {
+    renderQueued = false;
+    renderer.setAnimationLoop(null); // hard stop any loops
+    renderOnce();
+  });
+}
 
 // render scheduler (render-on-demand)
 let needsRender = true;
@@ -63,6 +75,10 @@ function invalidate() { needsRender = true; requestAnimationFrame(renderIfNeeded
 function renderIfNeeded() {
   if (!needsRender || document.hidden) return;
   needsRender = false;
+  renderer.render(scene, camera);
+}
+
+function renderOnce() {
   renderer.render(scene, camera);
 }
 
@@ -99,14 +115,24 @@ bindUI();
 restoreFromURL();
 applyLighting(state.lighting);
 
-// Try to load a bundled model if present; otherwise show placeholder
-loadBundledModel('/public/models/tacoma.gltf').catch(() => {
-  console.warn('[TintLab] Missing /public/models/tacoma.gltf — using placeholder model.');
-  createPlaceholderCar();
-  applyAllTints();
-  setView(state.view);
-  invalidate();
-});
+// TINTLAB: quick existence check for public asset
+async function urlExists(url) {
+  try {
+    const r = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    return r.ok;
+  } catch { return false; }
+}
+
+// TINTLAB: boot the car
+let carRoot;
+(async () => {
+  const { scene: modelScene, isPlaceholder } = await loadModelOrPlaceholder('/models/2019-tacoma/tacoma.gltf');
+  carRoot = modelScene;
+  scene.add(carRoot);
+  initOrRemapGlass(carRoot); // your existing mapping + proxy handling
+  console.log('[TintLab] Car ready. Placeholder?', isPlaceholder);
+  requestRender();
+})();
 
 /* ============================== Init ============================== */
 function initRenderer() {
@@ -129,11 +155,13 @@ function initRenderer() {
     e.preventDefault(); dropEl.style.display = 'none';
     const file = e.dataTransfer?.files?.[0]; if (!file) return;
     await loadLocalModel(file);
+    requestRender();
   });
   modelBtn.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', async (e) => {
     const file = e.target.files?.[0]; if (!file) return;
     await loadLocalModel(file);
+    requestRender();
   });
 }
 
@@ -160,6 +188,61 @@ function initScene() {
 }
 
 /* ============================== Model Loading ============================== */
+const DEFAULT_MODEL_URL = '/models/2019-tacoma/tacoma.gltf';
+
+async function loadModelOrPlaceholder(url = DEFAULT_MODEL_URL) {
+  const exists = await urlExists(url);
+  if (!exists) {
+    console.warn('[TintLab] Missing', url, '— using placeholder model.');
+    return { scene: makeCarPlaceholder(), isPlaceholder: true };
+  }
+  return new Promise((resolve) => {
+    const loader = new GLTFLoader();
+    loader.load(
+      url,
+      (gltf) => {
+        console.log('[TintLab] Loaded model:', url);
+
+        // Process the loaded model
+        const root = gltf.scene;
+
+        // Normalize scale & center
+        const box = new THREE.Box3().setFromObject(root);
+        const size = new THREE.Vector3(); const center = new THREE.Vector3();
+        box.getSize(size); box.getCenter(center);
+        const scale = 3.8 / Math.max(size.x, size.z); // fit similar to placeholder length
+        root.scale.setScalar(scale);
+        root.position.sub(center.multiplyScalar(scale)); // center on origin
+        root.position.y = 0.9; // sit above ground
+
+        // Materials quick pass: add nice clearcoat if we detect "body"/"paint"
+        root.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = o.receiveShadow = false;
+            if (o.material && !Array.isArray(o.material)) {
+              const name = (o.material.name || o.name || '').toLowerCase();
+              if (name.includes('body') || name.includes('paint') || name.includes('carpaint')) {
+                o.material = new THREE.MeshPhysicalMaterial({
+                  color: o.material.color ?? new THREE.Color(0x888888),
+                  roughness: 0.35, metalness: 0.1, clearcoat: 1.0, clearcoatRoughness: 0.06,
+                  envMapIntensity: 1.0
+                });
+              }
+            }
+          }
+        });
+
+        resolve({ scene: root, isPlaceholder: false });
+      },
+      undefined,
+      (err) => {
+        console.warn('[TintLab] Failed to load model — using placeholder. Error:', err?.message || err);
+        resolve({ scene: makeCarPlaceholder(), isPlaceholder: true });
+      }
+    );
+  });
+}
+
 async function loadBundledModel(path) {
   // fetch to check existence
   const res = await fetch(path, { method: 'HEAD' });
@@ -170,75 +253,60 @@ async function loadBundledModel(path) {
 }
 
 async function loadLocalModel(file) {
+  // Dispose old carRoot
+  if (carRoot) {
+    carRoot.traverse((child) => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) {
+          child.material.forEach(mat => mat.dispose());
+        } else {
+          child.material.dispose();
+        }
+      }
+    });
+    scene.remove(carRoot);
+  }
+
   const url = URL.createObjectURL(file);
-  const loader = new GLTFLoader();
   try {
-    const gltf = await loader.loadAsync(url);
-    onModelLoaded(gltf.scene, file.name);
+    const { scene: modelScene } = await loadModelOrPlaceholder(url);
+    carRoot = modelScene;
+    scene.add(carRoot);
+    initOrRemapGlass(carRoot);
+    console.log('[TintLab] Loaded local model:', file.name);
   } finally {
     URL.revokeObjectURL(url);
   }
 }
 
 function clearCar() {
-  if (carRoot) { scene.remove(carRoot); }
+  if (carRoot) {
+    scene.remove(carRoot);
+    // Dispose of geometries and materials
+    carRoot.traverse((child) => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) {
+          child.material.forEach(mat => mat.dispose());
+        } else {
+          child.material.dispose();
+        }
+      }
+    });
+  }
   carRoot = undefined; car = undefined; glassMeshes = []; selected.clear(); updateSelectedLabel();
 }
 
 function onModelLoaded(root, label) {
   clearCar();
 
-  // Normalize scale & center
-  const box = new THREE.Box3().setFromObject(root);
-  const size = new THREE.Vector3(); const center = new THREE.Vector3();
-  box.getSize(size); box.getCenter(center);
-  const scale = 3.8 / Math.max(size.x, size.z); // fit similar to placeholder length
-  root.scale.setScalar(scale);
-  root.position.sub(center.multiplyScalar(scale)); // center on origin
-  root.position.y = 0.9; // sit above ground
+  carRoot = new THREE.Group();
+  carRoot.add(root);
+  scene.add(carRoot);
 
-  // Materials quick pass: add nice clearcoat if we detect "body"/"paint"
-  root.traverse((o) => {
-    if (o.isMesh) {
-      o.castShadow = o.receiveShadow = false;
-      if (o.material && !Array.isArray(o.material)) {
-        const name = (o.material.name || o.name || '').toLowerCase();
-        if (name.includes('body') || name.includes('paint') || name.includes('carpaint')) {
-          o.material = new THREE.MeshPhysicalMaterial({
-            color: o.material.color ?? new THREE.Color(0x888888),
-            roughness: 0.35, metalness: 0.1, clearcoat: 1.0, clearcoatRoughness: 0.06,
-            envMapIntensity: 1.0
-          });
-        }
-      }
-    }
-  });
-
-  carRoot = new THREE.Group(); carRoot.add(root); scene.add(carRoot);
-
-  // Collect glass meshes or make proxies
-  glassMeshes = findGlassMeshes(root);
-  if (glassMeshes.length < 3) {
-    console.warn('[TintLab] Model has few or no glass meshes; creating proxy panes.');
-    glassMeshes = createProxyGlass(root);
-    carRoot.add(...glassMeshes);
-  }
-
-  // Map glass to our canonical windows by position
-  const mapping = categorizeWindows(glassMeshes);
-  glassMeshes = WINDOWS.map(k => mapping[k]).filter(Boolean);
-
-  // For selection outlines per-mesh
-  glassMeshes.forEach(m => m.userData.outline = null);
-
-  car = root;
-
-  // Apply current scale and height settings
-  applyScaleAndHeight();
-
-  applyAllTints();
-  setView(state.view);
-  invalidate();
+  // Initialize glass meshes
+  initOrRemapGlass(carRoot);
 }
 
 // TINTLAB: Apply scale and height adjustments to the car model
@@ -252,9 +320,11 @@ function applyScaleAndHeight() {
   carRoot.position.y = 0.9 + state.height;
 
   // Update controls target to follow car
-  controls.target.y = 1.2 + state.height;
+  if (controls && controls.target) {
+    controls.target.y = 1.2 + state.height;
+  }
 
-  invalidate();
+  requestRender();
 }
 
 // TINTLAB: Take a screenshot of the current viewport and download it
@@ -315,6 +385,7 @@ function createProxyGlass(root) {
     m.rotation.setFromVector3(rot);
     // TINTLAB: Mark as proxy for debugging
     m.userData.proxy = true;
+    m.userData.proxyID = name;
     return m;
   };
 
@@ -341,7 +412,7 @@ function createProxyGlass(root) {
 }
 
 // Create a simple placeholder car when no model is loaded
-function createPlaceholderCar() {
+function makeCarPlaceholder() {
   const carGroup = new THREE.Group();
 
   // Car body
@@ -375,18 +446,25 @@ function createPlaceholderCar() {
   });
 
   // Create glass meshes
-  glassMeshes = createProxyGlass(carGroup);
-  carGroup.add(...glassMeshes);
+  const proxyGlass = createProxyGlass(carGroup);
+  carGroup.add(...proxyGlass);
 
   // For selection outlines per-mesh
-  glassMeshes.forEach(m => m.userData.outline = null);
+  proxyGlass.forEach(m => m.userData.outline = null);
 
+  return carGroup;
+}
+
+// Create a simple placeholder car when no model is loaded
+function createPlaceholderCar() {
+  const carGroup = makeCarPlaceholder();
   carRoot = carGroup;
   car = carGroup;
   scene.add(carRoot);
 
   // TINTLAB: Apply current scale and height settings
   applyScaleAndHeight();
+  requestRender();
 }
 
 function categorizeWindows(meshes) {
@@ -430,7 +508,7 @@ function categorizeWindows(meshes) {
     console.log('[TintLab] Mapped panes:', Object.fromEntries(Object.entries(out).map(([k, v]) => [k, v.name])));
   } else {
     const missing = WINDOWS.filter(k => !out[k]);
-    console.info('[TintLab] Using proxy panes for:', missing);
+    console.info('[TintLAB] Using proxy panes for:', missing);
   }
 
   return out;
@@ -440,6 +518,33 @@ function approxArea(mesh) {
   mesh.geometry.computeBoundingBox();
   const s = mesh.geometry.boundingBox.getSize(new THREE.Vector3());
   return s.x * s.y + s.x * s.z + s.y * s.z; // rough
+}
+
+// TINTLAB: Initialize or remap glass meshes for a car model
+function initOrRemapGlass(carModel) {
+  // Collect glass meshes or make proxies
+  glassMeshes = findGlassMeshes(carModel);
+  if (glassMeshes.length < 3) {
+    console.warn('[TintLab] Model has few or no glass meshes; creating proxy panes.');
+    glassMeshes = createProxyGlass(carModel);
+    carModel.add(...glassMeshes);
+  }
+
+  // Map glass to our canonical windows by position
+  const mapping = categorizeWindows(glassMeshes);
+  glassMeshes = WINDOWS.map(k => mapping[k]).filter(Boolean);
+
+  // For selection outlines per-mesh
+  glassMeshes.forEach(m => m.userData.outline = null);
+
+  car = carModel.children[0] || carModel; // Get the actual car model from the group
+
+  // Apply current scale and height settings
+  applyScaleAndHeight();
+
+  applyAllTints();
+  setView(state.view);
+  requestRender();
 }
 
 /* ============================== Lighting/View ============================== */
@@ -454,7 +559,7 @@ function applyLighting(preset) {
     case 'night': amb.intensity = 0.15; sun.intensity = 0.25; sun.color.set('#a7c7ff'); break;
     case 'storm': amb.intensity = 0.25; sun.intensity = 0.6; sun.color.set('#dfe5ee'); break;
   }
-  invalidate();
+  requestRender();
 }
 
 function setView(mode) {
@@ -466,7 +571,7 @@ function setView(mode) {
     camera.position.set(0.15, 1.3, 0.25); controls.target.set(2.2, 1.0, 0.3);
     controls.enablePan = false; controls.minDistance = 0.1; controls.maxDistance = 1.5;
   }
-  controls.update(); writeURL(); invalidate();
+  controls.update(); writeURL(); requestRender();
 }
 
 /* ============================== Tinting ============================== */
@@ -501,7 +606,7 @@ function applyAllTints() {
     const mesh = mapByName[k];
     if (mesh) applyTintToMesh(mesh, vlt, film);
   });
-  invalidate();
+  requestRender();
 }
 
 /* ============================== Selection ============================== */
@@ -519,12 +624,27 @@ function onPointerDown(e) {
   const mesh = hits[0].object;
   if (e.shiftKey) { if (selected.has(mesh)) deselect(mesh); else select(mesh); }
   else { if (!(selected.size === 1 && selected.has(mesh))) { clearSelection(); select(mesh); } }
-  updateSelectedLabel(); invalidate();
+  updateSelectedLabel();
 }
 
-function select(mesh) { if (selected.has(mesh)) return; selected.add(mesh); addOutline(mesh); }
-function deselect(mesh) { if (!selected.has(mesh)) return; selected.delete(mesh); removeOutline(mesh); }
-function clearSelection() { [...selected].forEach(removeOutline); selected.clear(); updateSelectedLabel(); }
+function select(mesh) {
+  if (selected.has(mesh)) return;
+  selected.add(mesh);
+  addOutline(mesh);
+  requestRender();
+}
+function deselect(mesh) {
+  if (!selected.has(mesh)) return;
+  selected.delete(mesh);
+  removeOutline(mesh);
+  requestRender();
+}
+function clearSelection() {
+  [...selected].forEach(removeOutline);
+  selected.clear();
+  updateSelectedLabel();
+  requestRender();
+}
 
 function addOutline(mesh) {
   if (mesh.userData.outline) return;
@@ -537,7 +657,12 @@ function addOutline(mesh) {
 }
 function removeOutline(mesh) {
   const lines = mesh.userData.outline;
-  if (lines) { (carRoot || scene).remove(lines); lines.geometry.dispose(); lines.material.dispose(); mesh.userData.outline = null; }
+  if (lines) {
+    (carRoot || scene).remove(lines);
+    lines.geometry.dispose();
+    lines.material.dispose();
+    mesh.userData.outline = null;
+  }
 }
 function updateSelectedLabel() {
   const names = [...selected].map(m => m.name.toUpperCase()).join(', ');
@@ -552,44 +677,58 @@ function bindUI() {
   scaleValue.textContent = state.scale.toFixed(2); heightValue.textContent = `${state.height.toFixed(3)}m`;
 
   viewSel.addEventListener('change', () => setView(viewSel.value));
-  lightSel.addEventListener('change', () => { state.lighting = lightSel.value; applyLighting(state.lighting); writeURL(); });
-  filmSel.addEventListener('change', () => { state.film = filmSel.value; applyAllTints(); writeURL(); });
-  shadeSel.addEventListener('change', () => { state.shade = parseInt(shadeSel.value, 10); if (state.uniform) applyAllBtn.click(); writeURL(); });
-  uniformChk.addEventListener('change', () => { state.uniform = uniformChk.checked; applyAllTints(); writeURL(); });
+  lightSel.addEventListener('change', () => { state.lighting = lightSel.value; applyLighting(state.lighting); writeURL(); requestRender(); });
+  filmSel.addEventListener('change', () => { state.film = filmSel.value; applyAllTints(); writeURL(); requestRender(); });
+  shadeSel.addEventListener('change', () => { state.shade = parseInt(shadeSel.value, 10); if (state.uniform) applyAllBtn.click(); writeURL(); requestRender(); });
+  uniformChk.addEventListener('change', () => { state.uniform = uniformChk.checked; applyAllTints(); writeURL(); requestRender(); });
 
   // TINTLAB: Scale and height slider handlers
   scaleSlider.addEventListener('input', () => {
     state.scale = parseFloat(scaleSlider.value);
     scaleValue.textContent = state.scale.toFixed(2);
     applyScaleAndHeight();
-    writeURL();
+    setURLParams(p => { p.set('sc', state.scale.toFixed(2)); });
   });
 
   heightSlider.addEventListener('input', () => {
     state.height = parseFloat(heightSlider.value);
     heightValue.textContent = `${state.height.toFixed(3)}m`;
     applyScaleAndHeight();
-    writeURL();
+    setURLParams(p => { p.set('h', state.height.toFixed(3)); });
   });
 
   applySelBtn.addEventListener('click', () => {
     const shade = parseInt(shadeSel.value, 10);
     if (state.uniform) { [...selected].forEach(m => state.windows[m.name] = shade); state.uniform = false; uniformChk.checked = false; }
     else { [...selected].forEach(m => state.windows[m.name] = shade); }
-    applyAllTints(); writeURL();
+    applyAllTints(); writeURL(); requestRender();
   });
 
   applyAllBtn.addEventListener('click', () => {
     const shade = parseInt(shadeSel.value, 10);
     WINDOWS.forEach(k => state.windows[k] = shade);
-    applyAllTints(); writeURL();
+    applyAllTints(); writeURL(); requestRender();
   });
 
   resetCamBtn.addEventListener('click', () => setView(state.view));
-  screenshotBtn.addEventListener('click', takeScreenshot);
+  screenshotBtn.addEventListener('click', () => {
+    requestRender(); // ensure a fresh frame
+    const data = renderer.domElement.toDataURL('image/png');
+    const a = document.createElement('a');
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    a.href = data; a.download = `tintlab_${ts}.png`;
+    a.click();
+  });
 }
 
 /* ============================== URL State ============================== */
+// TINTLAB: URL state helpers for sc, h
+function getURLParams() { return new URLSearchParams(window.location.search); }
+function setURLParams(mutator) {
+  const p = getURLParams(); mutator(p);
+  history.replaceState(null, '', `${location.pathname}?${p.toString()}`);
+}
+
 function writeURL() {
   const p = new URLSearchParams();
   p.set('v', state.view);
@@ -626,6 +765,13 @@ function restoreFromURL() {
   shadeSel.value = String(state.shade); uniformChk.checked = state.uniform;
   scaleSlider.value = state.scale.toFixed(2); heightSlider.value = state.height.toFixed(3);
   scaleValue.textContent = state.scale.toFixed(2); heightValue.textContent = `${state.height.toFixed(3)}m`;
+
+  // Restore from URL on boot
+  (() => {
+    const p = getURLParams();
+    if (p.has('sc')) { scaleSlider.value = p.get('sc'); }
+    if (p.has('h')) { heightSlider.value = p.get('h'); }
+  })();
 }
 
 /* ============================== Resize ============================== */
