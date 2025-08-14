@@ -1,81 +1,190 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-    <title>TintLab — Window Tint Simulator</title>
-    <meta name="description" content="Interactive automotive window tint simulator." />
-    <style>
-      :root {
-        color-scheme: dark;
-        --bg:#0f1115; --panel:#151821cc; --text:#e9ecf1; --muted:#9aa3ad; --border:#232833;
-      }
-      html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
-        font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Inter,Roboto,Helvetica,Arial}
-      #app{height:100%;position:relative;overflow:hidden}
-      .ui{position:fixed;top:12px;left:12px;display:grid;gap:8px;padding:12px;background:var(--panel);
-        backdrop-filter:blur(6px);border-radius:12px;border:1px solid var(--border);z-index:10}
-      .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-      label{color:var(--muted);font-weight:600;margin-right:4px}
-      select,button,input[type="checkbox"]{appearance:none;background:#1a1f29;color:var(--text);
-        border:1px solid #2a3040;border-radius:10px;padding:6px 10px}
-      button{cursor:pointer}
-      .badge{display:inline-block;padding:2px 6px;border:1px solid var(--border);border-radius:8px;color:var(--muted)}
-      .perf{position:fixed;right:12px;bottom:12px;color:var(--muted);font-size:12px;opacity:.8}
-      canvas{display:block}
-    </style>
-  </head>
-  <body>
-    <div id="app"></div>
 
-    <div class="ui">
-      <div class="row">
-        <label for="viewSel">View</label>
-        <select id="viewSel">
-          <option value="outside" selected>Outside</option>
-          <option value="inside">Inside</option>
-        </select>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>TintLab — Window Tint Simulator</title>
+  <meta name="description" content="Interactive automotive window tint simulator." />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1115;
+      --panel: #151821cc;
+      --text: #e9ecf1;
+      --muted: #9aa3ad;
+      --border: #232833;
+    }
 
-        <label for="lightSel">Light</label>
-        <select id="lightSel">
-          <option value="day" selected>Day</option>
-          <option value="dusk">Dusk</option>
-          <option value="night">Night</option>
-          <option value="storm">Storm</option>
-        </select>
-      </div>
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI, Inter, Roboto, Helvetica, Arial
+    }
 
-      <div class="row">
-        <label for="filmSel">Film</label>
-        <select id="filmSel">
-          <option value="ceramic" selected>Ceramic</option>
-          <option value="carbon">Carbon</option>
-          <option value="dyed">Dyed</option>
-        </select>
+    #app {
+      height: 100%;
+      position: relative;
+      overflow: hidden
+    }
 
-        <label for="shadeSel">Shade</label>
-        <select id="shadeSel">
-          <option>5</option><option>10</option><option selected>15</option>
-          <option>20</option><option>35</option><option>50</option><option>70</option>
-        </select>
+    .ui {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      background: var(--panel);
+      backdrop-filter: blur(6px);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      z-index: 10
+    }
 
-        <label for="uniformChk">Uniform</label>
-        <input id="uniformChk" type="checkbox" />
-      </div>
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap
+    }
 
-      <div class="row">
-        <button id="applySelBtn">Apply to Selected</button>
-        <button id="applyAllBtn">Apply to All</button>
-        <button id="resetCam">Reset Camera</button>
-      </div>
+    label {
+      color: var(--muted);
+      font-weight: 600;
+      margin-right: 4px
+    }
 
-      <div class="row">
-        <span id="selLabel">Selected: —</span>
-        <span class="badge">Shift-click = multi-select</span>
-      </div>
+    select,
+    button,
+    input[type="checkbox"] {
+      appearance: none;
+      background: #1a1f29;
+      color: var(--text);
+      border: 1px solid #2a3040;
+      border-radius: 10px;
+      padding: 6px 10px
+    }
+
+    button {
+      cursor: pointer
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--muted)
+    }
+
+    .perf {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      opacity: .8
+    }
+
+    .drop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      place-items: center;
+      background: #0008;
+      color: #fff;
+      font-size: 18px;
+      z-index: 20
+    }
+
+    canvas {
+      display: block
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app"></div>
+
+  <div class="ui">
+    <div class="row">
+      <label for="viewSel">View</label>
+      <select id="viewSel">
+        <option value="outside" selected>Outside</option>
+        <option value="inside">Inside</option>
+      </select>
+
+      <label for="lightSel">Light</label>
+      <select id="lightSel">
+        <option value="day" selected>Day</option>
+        <option value="dusk">Dusk</option>
+        <option value="night">Night</option>
+        <option value="storm">Storm</option>
+      </select>
+
+      <label for="modelBtn" class="badge">Model</label>
+      <button id="modelBtn">Load .glb</button>
     </div>
 
-    <div class="perf" id="perf">pxRatio —</div>
-    <script type="module" src="/src/main.js"></script>
-  </body>
+    <div class="row">
+      <label for="filmSel">Film</label>
+      <select id="filmSel">
+        <option value="ceramic" selected>Ceramic</option>
+        <option value="carbon">Carbon</option>
+        <option value="dyed">Dyed</option>
+      </select>
+
+      <label for="shadeSel">Shade</label>
+      <select id="shadeSel">
+        <option>5</option>
+        <option>10</option>
+        <option selected>15</option>
+        <option>20</option>
+        <option>35</option>
+        <option>50</option>
+        <option>70</option>
+      </select>
+
+      <label for="uniformChk">Uniform</label>
+      <input id="uniformChk" type="checkbox" />
+    </div>
+
+    <div class="row">
+      <button id="applySelBtn">Apply to Selected</button>
+      <button id="applyAllBtn">Apply to All</button>
+      <button id="resetCam">Reset Camera</button>
+    </div>
+
+    <div class="row">
+      <label for="scaleSlider">Scale</label>
+      <input id="scaleSlider" type="range" min="0.8" max="1.2" step="0.01" value="1.00" />
+      <span id="scaleValue">1.00</span>
+
+      <label for="heightSlider">Height</label>
+      <input id="heightSlider" type="range" min="-0.15" max="0.15" step="0.005" value="0.00" />
+      <span id="heightValue">0.00m</span>
+    </div>
+
+    <div class="row">
+      <button id="screenshotBtn">Screenshot</button>
+      <span id="selLabel">Selected: —</span>
+      <span class="badge">Shift-click = multi-select</span>
+    </div>
+  </div>
+
+  <div class="perf" id="perf">pxRatio —</div>
+
+  <!-- Drag-and-drop overlay -->
+  <div class="drop" id="drop">
+    <div>Drop a .glb car model here</div>
+  </div>
+
+  <input id="fileInput" type="file" accept=".glb,.gltf" style="display:none" />
+  <script type="module" src="/src/main.js"></script>
+</body>
+
 </html>
